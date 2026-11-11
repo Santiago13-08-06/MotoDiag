@@ -243,3 +243,228 @@ ordenadas por peso descendente (a igual peso, por el orden de las preguntas). `T
 | `severidad/3` (R16), `prioridad/3` (R17), `recomendacion_final/3` (R18) | Gravedad y recomendación |
 | `construir_diagnostico/4` (R20) | Ordenamiento y datos del diagnóstico |
 | `etiqueta/2`, `legible/2`, `primeros/3`, `valores_de_pares/2`, `elementos_faltantes/3` | Utilidades de listas y textos |
+
+---
+
+## 6. Aprendizaje: el sistema agrega fallas y síntomas nuevos (extensión)
+
+Los predicados del catálogo se declaran `dynamic` para poder crecer en tiempo de ejecución:
+`falla_subsistema/2`, `nombre_falla/2`, `requisitos_falla/2`, `sintoma_apoyo/2`, `excluyente/2`,
+`agravante_de/2`, `restriccion_alimentacion/2`, `gravedad_base/2`, `recomendacion_base/2`,
+`categoria_sintoma/2`, `nombre_elemento/2` y `pregunta_sintoma/3`. Lo aprendido se agrega a esos
+mismos predicados con `assertz/1`, así que participa en la inferencia igual que el conocimiento
+del experto, y se guarda en `conocimiento_aprendido.pl` (un archivo de directivas que se
+consulta al arrancar).
+
+**Estados que devuelven los predicados de aprendizaje** (cada uno tiene su mensaje en
+`mensaje_aprendizaje/2`): `ok`, `nombre_vacio`, `nombre_largo`, `ya_existe`, `subsistema_invalido`,
+`gravedad_invalida`, `alimentacion_invalida`, `lista_invalida`, `pocos_requisitos`,
+`demasiados_requisitos`, `sintoma_desconocido`, `sintomas_repetidos`, `sintomas_contradictorios`, `falla_equivalente`, `agravante_invalido`,
+`recomendacion_vacia`, `recomendacion_larga`, `texto_vacio`, `texto_largo`, `categoria_invalida`,
+`no_aprendida`, `en_uso`.
+
+### Predicados principales (los invoca la interfaz)
+
+#### `aprender_falla/12` (R48) — det
+`aprender_falla(+Nombre, +Subsistema, +Gravedad, +Requisitos, +Apoyos, +Excluyentes, +Agravantes, +Alimentacion, +Recomendacion, -Estado, -Mensaje, -Falla)`
+
+| Argumento | Descripción |
+|---|---|
+| `+Nombre` | Nombre legible de la falla (máx. 60 caracteres) |
+| `+Subsistema` | Uno de los subsistemas del catálogo (no `general`) |
+| `+Gravedad` | `leve`, `moderada` o `critica` |
+| `+Requisitos` | De 2 a 5 síntomas que definen la falla (condiciones principales) |
+| `+Apoyos`, `+Excluyentes` | Listas de síntomas (pueden ser vacías); no pueden repetirse entre sí |
+| `+Agravantes` | Subconjunto de `[mantenimiento_vencido, bateria_vieja]` |
+| `+Alimentacion` | `cualquiera`, `carburador` o `inyeccion` |
+| `+Recomendacion` | Texto de la recomendación (máx. 300 caracteres) |
+| `-Estado`, `-Mensaje` | Resultado de la validación y su mensaje |
+| `-Falla` | Identificador generado a partir del nombre |
+
+Valida con `validar_falla/13`; si todo está bien registra con `registrar_falla/10` y guarda con
+`guardar_aprendizaje/0`. Si algo falla no cambia nada.
+
+```prolog
+?- aprender_falla('Rodamiento de dirección dañado', frenos_transmision, moderada,
+                  [ruido_al_girar_el_manubrio, vibracion_excesiva], [ruido_metalico], [],
+                  [mantenimiento_vencido], cualquiera,
+                  'Revise y cambie los rodamientos.', E, M, F).
+% E = ok, F = rodamiento_de_direccion_danado
+```
+
+#### `aprender_sintoma/5` (R45) — det
+`aprender_sintoma(+Texto, +Categoria, -Estado, -Mensaje, -Elemento)`
+
+Agrega un síntoma nuevo al catálogo: genera el identificador, el nombre y la pregunta
+(`¿Texto?`) y le da el siguiente número de orden. Rechaza texto vacío o largo (máx. 80),
+categoría inválida y nombres que ya existen.
+
+#### `olvidar_falla/3` (R49) y `olvidar_sintoma/3` (R50) — det
+`olvidar_falla(+Falla, -Estado, -Mensaje)` / `olvidar_sintoma(+Elemento, -Estado, -Mensaje)`
+
+Solo olvidan lo aprendido (`no_aprendida` si es del experto). Un síntoma que todavía usa alguna
+falla devuelve `en_uso`.
+
+### Validación y registro
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `validar_falla/13` (R46) | `+Nombre, +Subsistema, +Gravedad, +Req, +Apo, +Exc, +Agr, +Alim, +Rec, -Estado, -Falla, -NombreLimpio, -RecLimpia` | Reglas excluyentes con corte: cada una detecta un problema; la última es el caso `ok` |
+| `validar_sintoma_nuevo/6` (R43) | `+Texto, +Categoria, -Estado, -Elemento, -Nombre, -Pregunta` | Validación de un síntoma nuevo, con el mismo esquema |
+| `registrar_falla/10` (R47) | `+Falla, +Sub, +Nombre, +Req, +Apo, +Exc, +Gravedad, +Rec, +Alim, +Agr` | Agrega la falla con `assertz/1`. Idempotente; también lo usa la carga del archivo |
+| `registrar_sintoma/4` (R44) | `+Elemento, +Categoria, +Nombre, +Pregunta` | Agrega el síntoma con `assertz/1`. Idempotente |
+| `texto_a_atomo/2` (R42) | `+Texto, -Atomo` | Texto libre a identificador: minúsculas, sin tildes, guiones bajos (máx. 40). Falla si no queda nada útil |
+| `normalizar_caracter/2`, `colapsar_guiones/2`, `recortar_guiones/2` | `+Entrada, -Salida` | Procesamiento recursivo de listas de caracteres usado por `texto_a_atomo/2` |
+| `texto_util/2`, `capitalizar/2`, `sin_signos/2` | `+Texto, -Resultado` | Limpieza de textos (espacios, mayúscula inicial, signos de interrogación) |
+| `sintoma_conocido/1` | `+Elemento` | Verdadero si el síntoma está en el catálogo y no es un dato de la moto |
+| `sintoma_en_uso/1` | `+Elemento` | Verdadero si alguna falla lo usa como condición, apoyo o excluyente |
+| `quitar_falla/1`, `quitar_sintoma/1` | `+Id` | Retiran de la memoria los hechos con `retractall/1` |
+
+### Persistencia
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `guardar_aprendizaje/0` | — | Escribe `conocimiento_aprendido.pl` (primero en un temporal, para no dejarlo a medias) |
+| `cargar_aprendizaje/0` | — | Consulta el archivo si existe; sus directivas llaman a `registrar_sintoma/4` y `registrar_falla/10` |
+| `usar_archivo_aprendizaje/1` | `+Ruta` | Cambia el archivo y lo carga (lo usan las pruebas) |
+| `reiniciar_aprendizaje/0` | — | Vuelve al conocimiento original del experto y vacía el archivo |
+| `olvidar_todo_en_memoria/0` | — | Retira de la memoria todo lo aprendido sin tocar el archivo |
+
+### Consultas para la interfaz
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `catalogo_sintomas/1` | `-Lista` | `[[Elemento, TituloCategoria, Nombre], ...]` para elegir condiciones |
+| `catalogo_subsistemas/1`, `catalogo_categorias/1`, `catalogo_gravedades/1` | `-Lista` | Opciones de los desplegables |
+| `listar_fallas_aprendidas/1` | `-Lista` | `[[Id, Nombre, Subsistema, Gravedad, Requisitos, Apoyos, Excluyentes, Alimentacion, Recomendacion], ...]` |
+| `listar_sintomas_aprendidos/1` | `-Lista` | `[[Elemento, TituloCategoria, Nombre], ...]` |
+| `preguntas_guiadas/1` (modificado) | `-Lista` | Ahora agrupa por categoría, así que un síntoma aprendido queda junto a los de su categoría |
+| `orden_categoria/2` | `+Categoria, -Rango` | Menor número de pregunta de la categoría (para ordenar los grupos) |
+
+### Hechos nuevos
+
+| Predicado | Contenido |
+|---|---|
+| `mensaje_aprendizaje/2` | `mensaje_aprendizaje(Estado, Texto)`: mensaje de cada estado (22 hechos) |
+| `sin_tilde/2` | Correspondencia letra con tilde a letra sin tilde (21 hechos) |
+| `limite_texto/2`, `limite_requisitos/2` | Longitudes máximas de los textos y mínimo y máximo de condiciones principales |
+| `agravante_permitido/1`, `alimentacion_permitida/1` | Valores aceptados para agravantes y tipo de moto |
+| `sintoma_aprendido/4`, `falla_aprendida/10` | Memoria de lo que el usuario enseñó (dinámicos): de aquí se escribe el archivo |
+| `ruta_aprendizaje/1` | Ruta del archivo de aprendizaje (dinámico; por defecto junto a la base) |
+
+---
+
+## 7. Validaciones de coherencia de la entrada (extensión)
+
+Una moto real no puede presentar a la vez datos que se contradicen (carburador e inyección,
+luces normales y apagadas...). Estos predicados, en la sección 19 de `base_conocimiento.pl`,
+detectan esas contradicciones. La interfaz solo los consulta y muestra el resultado.
+
+### Predicados principales
+
+#### `validar_observaciones/3` (R54) — det
+`validar_observaciones(+Obs, -Estado, -Problemas)`
+
+| Argumento | Descripción |
+|---|---|
+| `+Obs` | Lista de observaciones tal como la envía la interfaz |
+| `-Estado` | `ok`, `entrada_invalida`, `incoherente` o `sin_sintomas` |
+| `-Problemas` | `[[Tipo, Mensaje], ...]` con cada problema encontrado (vacía si `ok`) |
+
+La interfaz la llama en cada cambio: si el estado no es `ok`, muestra los mensajes y desactiva
+**Diagnosticar**. Cláusulas excluyentes con corte y valor por defecto `ok`.
+
+```prolog
+?- validar_observaciones([alimentacion_carburador, alimentacion_inyeccion], E, P).
+% E = incoherente
+?- validar_observaciones([alimentacion_carburador], E, P).
+% E = sin_sintomas
+```
+
+#### `validar_coherencia/2` (R52) — det
+`validar_coherencia(+Obs, -Problemas)`
+
+Reúne con `findall/3` todos los problemas de `problema/3` y quita repetidos (`list_to_set/2`).
+Lista vacía: la entrada no se contradice. La usan `diagnosticar/4`, `diagnosticar_explicado/5`,
+`recomendar_evidencia/5` y `validar_falla/13`.
+
+### Reglas y consultas
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `problema/3` (R51) | `+Obs, -Tipo, -Mensaje` | nondet. Un problema por cláusula: `exclusivo` (dos opciones de un mismo grupo), `incompatible` (par imposible), `fuera_de_rango` y `dato_repetido` (datos numéricos) |
+| `genera_conflicto/2` (R53) | `+Sintoma, +Obs` | Verdadero si agregar el síntoma a `Obs` crearía una contradicción. `sugerencias_desempate/2` lo usa para no proponer datos que contradigan lo marcado |
+| `mensajes_de_problemas/2` | `+Problemas, -Mensajes` | Solo los textos (recursión sobre lista) |
+| `hay_sintoma/1` | `+Obs` | Verdadero si hay al menos un síntoma (los datos de la moto y el historial no bastan) |
+| `grupos_exclusivos/1` | `-Lista` | `[[Id, Descripcion, Miembros], ...]`: la interfaz lo usa para dejar marcada una sola opción por grupo |
+| `limites_numericos/1` | `-Lista` | `[[Dato, Minimo, Maximo], ...]`: rangos de los campos numéricos |
+| `falla_con_mismos_requisitos/3` | `+Req, +Alim, -Falla` | Una falla del catálogo exige exactamente esas condiciones y el mismo tipo de moto (se rechaza al enseñar) |
+| `mensaje_de_aprendizaje/5` | `+Estado, +Req, +Apo, +Falla, -Mensaje` | Agrega el detalle (cuál contradicción, cuál falla ya existe) a los dos estados nuevos de aprendizaje |
+| `elemento_valido/1` (R1, modificado) | `+Elemento` | Los datos numéricos ahora deben estar dentro de `limite_dato/3` |
+| `diagnosticar/4`, `diagnosticar_explicado/5`, `recomendar_evidencia/5` (modificados) | — | Con datos contradictorios no diagnostican: devuelven los motivos (`Alertas`, o estado `entrada_incoherente`) |
+
+### Hechos nuevos
+
+| Predicado | Contenido |
+|---|---|
+| `grupo_exclusivo/3` | `grupo_exclusivo(Id, Descripcion, Miembros)`: como máximo uno de los miembros puede ser cierto. Seis grupos: alimentación, giro del motor, chispa, color del humo, intensidad de las luces, temperatura de la falla |
+| `incompatible/3` | `incompatible(A, B, Motivo)`: par de síntomas de grupos distintos que no pueden darse juntos (siete pares) |
+| `limite_dato/3` | `limite_dato(Dato, Minimo, Maximo)`: 0 a 100000 km y 0 a 120 meses |
+| `nombre_dato/2` | Texto de cada dato numérico para los mensajes |
+| `mensaje_evidencia/2` | Nuevo estado `entrada_incoherente` |
+| `mensaje_aprendizaje/2` | Nuevos estados `sintomas_contradictorios` y `falla_equivalente` |
+
+Como el conocimiento está en hechos, agregar un grupo o un par imposible es agregar una línea;
+las reglas no cambian.
+
+## 8. Entregable 3: lenguaje natural (DCG), roles y lecturas
+
+Archivo nuevo `gramatica_dcg.pl` (lo carga `base_conocimiento.pl`). Reglas R55 a R70.
+Python solo envía el texto y muestra lo que Prolog entiende; la gramática, el vocabulario,
+los permisos y la validación están en Prolog.
+
+### Análisis de la oración (DCG)
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `interpretar_texto/8` (R64) | `+Texto, -Estado, -Hechos, -Datos, -Ausentes, -Lecturas, -Interpretacion, -Desconocidas` | Predicado principal. `Estado`: `ok`, `texto_vacio`, `texto_largo` o `no_entendido`. `Interpretacion` = `[[Frase, Tipo, Nombre, Valor], ...]` indica qué palabras dieron cada hecho |
+| `tokenizar/2` | `+Texto, -Tokens` | Minúsculas, sin tildes (`sin_tilde/2`), separa letras de dígitos, "9.000" pasa a 9000, "12,2" a 12.2; la puntuación es el token `sep` |
+| `oracion//1` (R55) | `-Items` | Una oración es una o más cláusulas separadas por conectores (y, pero, además, coma...) |
+| `clausulas//1`, `clausula//1` (R56–R57) | `-Items` | Recursión sobre las cláusulas; cada una produce un ítem |
+| `sintagma//1` (R58) | `-Item` | Alternativas en orden: `lectura`, `dato_historial`, `sintoma`, `sintoma_negado`, relleno omitido, palabra desconocida |
+| `sintoma//1` (R59) | `-hecho(E, Frase)` | Frase del léxico; gana la coincidencia más larga (`findall/3` + `keysort/2`). Puede saltar hasta 3 palabras de relleno |
+| `sintoma_negado//1` (R60) | `-ausente(E, Frase)` | "no" + frase: el usuario descarta ese síntoma |
+| `cantidad//1` (R61) | `-N` | Dígitos, "9 mil", "nueve mil", palabras numéricas |
+| `lectura//1` (R62) | `-lectura(Variable, Valor, Frase)` | Medida con unidad ("125 grados", "12,2 voltios", "45 mm", "22 km por litro") |
+| `dato_historial//1` (R63) | `-dato(Dato, Valor, Frase)` | Kilómetros desde el mantenimiento (cualquier orden) y edad de la batería (meses o años) |
+| `estado_texto/2`, `separar_items/7` | — | Validación del texto y reparto de los ítems en listas |
+
+### Vocabulario que enseña el experto
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `aprender_frase/4` (R68) | `+Texto, +Elemento, -Estado, -Mensaje` | Valida, registra con `assertz/1` y guarda el archivo. Estados: `ok`, `texto_vacio`, `texto_largo`, `frase_sin_palabras`, `frase_larga`, `elemento_desconocido`, `frase_repetida`, `frase_ambigua` |
+| `validar_frase/4` (R66) | `+Texto, +Elemento, -Estado, -Palabras` | Todas las comprobaciones, en orden |
+| `registrar_frase/2` (R67) | `+Palabras, +Elemento` | `assertz(frase_aprendida/2)`; idempotente; también lo usa la carga del archivo |
+| `olvidar_frase/3` | `+Texto, -Estado, -Mensaje` | Solo expresiones enseñadas (`ok` o `no_aprendida`) |
+| `listar_frases_aprendidas/1` | `-Lista` | `[[Texto, Elemento, Nombre], ...]` |
+| `registrar_frase_de_nombre/2` | `+Elemento, +Nombre` | Un síntoma nuevo queda describible con su propio nombre |
+
+### Roles y lecturas
+
+| Predicado / aridad | Argumentos | Descripción funcional |
+|---|---|---|
+| `permiso/2` | `+Rol, +Accion` | Hechos: el usuario diagnostica y describe en texto; el experto además enseña falla, síntoma y frase, y olvida |
+| `autorizar/4` (R71) | `+Rol, +Accion, -Estado, -Mensaje` | `ok` o `no_autorizado`. Todo rol o acción desconocidos se deniega. Lo consultan `aprender_*` y `olvidar_*` de Python antes de modificar nada |
+| `variable_lectura/5` | `Variable, Unidad, Min, Max, Descripcion` | Lecturas del taller y sus rangos |
+| `validar_lectura/4` (R69) | `+Variable, +Valor, -Estado, -Mensaje` | `ok`, `fuera_de_rango`, `variable_desconocida` o `lectura_invalida` |
+| `lectura_nivel/3` / `hecho_de_lectura/3` (R70) | `Variable, Nivel, Elemento` | Qué síntoma significa un nivel (alto, bajo). El nivel lo da scikit-learn en `preprocesamiento.py` |
+| `variables_lectura/1` | `-Lista` | Para armar el formulario de lecturas |
+
+### Hechos nuevos
+
+| Predicado | Contenido |
+|---|---|
+| `frase/2` | Léxico del experto: unas 190 expresiones y el síntoma que significan |
+| `frase_aprendida/2` (dinámico) | Expresiones enseñadas; se escriben en `conocimiento_aprendido.pl` como `:- registrar_frase([...], Sintoma).` |
+| `relleno/1`, `conector/1`, `negacion/1`, `unidad/2`, `palabra_numero/2` | Palabras que la gramática omite, separa, niega o convierte |

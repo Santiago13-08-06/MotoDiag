@@ -57,38 +57,53 @@ def preguntar_si_no(texto):
         print("    Responda 's' o 'n' (o 'salir' para terminar).")
 
 
-def preguntar_numero(texto):
-    """Pregunta numerica opcional. Enter la omite."""
+def preguntar_numero(texto, minimo, maximo):
+    """Pregunta numerica opcional dentro del rango que define Prolog. Enter la omite."""
     while True:
         respuesta = input(f"  {texto} (Enter si no sabe): ").strip()
         if respuesta == "":
             return None
         try:
             valor = int(respuesta)
-            if valor >= 0:
+            if minimo <= valor <= maximo:
                 return valor
         except ValueError:
             pass
-        print("    Escriba un número entero positivo o presione Enter.")
+        print(f"    Escriba un número entero entre {minimo} y {maximo}, o presione Enter.")
 
 
 def recoger_observaciones(motor):
-    """Hace las preguntas guiadas que entrega Prolog y arma la lista de entrada."""
+    """Hace las preguntas guiadas que entrega Prolog y arma la lista de entrada.
+
+    Las reglas de coherencia tambien son de Prolog: si el usuario responde que si
+    a algo que no puede darse junto con una respuesta anterior, se le avisa y se
+    le vuelve a preguntar (no se acepta una combinacion imposible).
+    """
     observados = []
     grupo_actual = None
     for titulo, elemento, texto in motor.preguntas_guiadas():
         if titulo != grupo_actual:
             grupo_actual = titulo
             print(f"\n[{titulo}]")
-        respuesta = preguntar_si_no(texto)
-        if respuesta is None:
-            return None
-        if respuesta:
-            observados.append(elemento)
+        while True:
+            respuesta = preguntar_si_no(texto)
+            if respuesta is None:
+                return None
+            if not respuesta:
+                break
+            estado = motor.validar_observaciones(observados + [elemento])
+            if estado["estado"] != "incoherente":
+                observados.append(elemento)
+                break
+            for problema in estado["problemas"]:
+                escribir("No se puede: " + problema["mensaje"], sangria=4)
+            print("    Responda de nuevo (si respondió mal antes, escriba 'salir' y empiece otra vez).")
 
     print("\n[HISTORIAL]")
+    limites = motor.limites_numericos()
     for dato, texto in motor.preguntas_numericas():
-        valor = preguntar_numero(texto)
+        minimo, maximo = limites.get(dato, (0, 1000000))
+        valor = preguntar_numero(texto, minimo, maximo)
         if valor is not None:
             observados.append((dato, valor))
     return observados
@@ -121,12 +136,16 @@ def mostrar_resultado(resultado):
         print()
 
     if resultado["alertas"]:
-        print("!! ALERTAS DE SEGURIDAD !!")
+        print("!! ALERTAS !!" if not resultado["diagnosticos"] else "!! ALERTAS DE SEGURIDAD !!")
         for alerta in resultado["alertas"]:
             escribir("* " + alerta, sangria=2)
         print()
 
     diagnosticos = resultado["diagnosticos"]
+    if not diagnosticos:      # Prolog no diagnostica datos que se contradicen
+        print(LINEA)
+        escribir("No se emitió diagnóstico: los datos ingresados se contradicen.")
+        return
     mostrar_diagnostico(diagnosticos[0], "DIAGNÓSTICO PRINCIPAL")
     for i, alterno in enumerate(diagnosticos[1:], start=1):
         print()

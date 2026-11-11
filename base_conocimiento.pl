@@ -18,6 +18,20 @@
 
 :- encoding(utf8).
 
+% ---------------------------------------------------------------------
+%  Predicados dinamicos (Entregable 2, extension de aprendizaje).
+%  El conocimiento del catalogo puede crecer en tiempo de ejecucion con
+%  assertz/1: las fallas y sintomas nuevos que ensene el usuario se
+%  agregan a estos mismos predicados y participan en la inferencia
+%  exactamente igual que los del experto.
+% ---------------------------------------------------------------------
+:- dynamic falla_subsistema/2, nombre_falla/2, requisitos_falla/2,
+           sintoma_apoyo/2, excluyente/2, agravante_de/2,
+           restriccion_alimentacion/2, gravedad_base/2, recomendacion_base/2.
+:- dynamic categoria_sintoma/2, nombre_elemento/2, pregunta_sintoma/3.
+:- dynamic sintoma_aprendido/4, falla_aprendida/10, ruta_aprendizaje/1.
+:- dynamic frase_aprendida/2.     % vocabulario de lenguaje natural (gramatica_dcg.pl)
+
 % =====================================================================
 %  SECCION 1. HECHOS - CATALOGO DE FALLAS
 % =====================================================================
@@ -428,13 +442,13 @@ elemento_valido(Elemento) :-
     atom(Elemento),
     categoria_sintoma(Elemento, _),
     !.
-elemento_valido(km_mantenimiento(Km)) :-
-    number(Km),
-    Km >= 0,
-    !.
-elemento_valido(antiguedad_bateria(Meses)) :-
-    number(Meses),
-    Meses >= 0.
+elemento_valido(Dato) :-
+    compound(Dato),
+    Dato =.. [Nombre, Valor],
+    limite_dato(Nombre, Minimo, Maximo),
+    number(Valor),
+    Valor >= Minimo,
+    Valor =< Maximo.
 
 % R2. Separa la lista de entrada en elementos validos e invalidos (recursion sobre lista).
 observados_validos([], [], []).
@@ -747,11 +761,18 @@ seleccionar_resultado(Todos, Resultado) :-
 
 % R23. PREDICADO PRINCIPAL DE CONSULTA (el unico que Python invoca para diagnosticar).
 %      diagnosticar(+Observados, -Resultados, -Invalidos, -Alertas)
+%      Si la entrada se contradice (R51), no diagnostica: devuelve los motivos como alertas.
 diagnosticar(Observados, Resultados, Invalidos, Alertas) :-
-    observados_validos(Observados, Validos, Invalidos),
-    todos_los_diagnosticos(Validos, Todos),
-    seleccionar_resultado(Todos, Resultados),
-    alertas_seguridad(Validos, Alertas).
+    validar_coherencia(Observados, Problemas),
+    (   Problemas == []
+    ->  observados_validos(Observados, Validos, Invalidos),
+        todos_los_diagnosticos(Validos, Todos),
+        seleccionar_resultado(Todos, Resultados),
+        alertas_seguridad(Validos, Alertas)
+    ;   Resultados = [],
+        Invalidos = [],
+        mensajes_de_problemas(Problemas, Alertas)
+    ).
 
 % =====================================================================
 %  SECCION 9. CONSULTAS AUXILIARES PARA LA INTERFAZ
@@ -759,15 +780,24 @@ diagnosticar(Observados, Resultados, Invalidos, Alertas) :-
 % =====================================================================
 
 % preguntas_guiadas(-Lista): [[TituloGrupo, Elemento, Texto], ...] en orden de aplicacion.
+%   Las preguntas se agrupan por categoria (la categoria que aparece primero va primero),
+%   de modo que un sintoma aprendido queda junto a los de su misma categoria.
 preguntas_guiadas(Lista) :-
-    findall(Orden-[Titulo, Elemento, Texto],
+    findall(Clave-[Titulo, Elemento, Texto],
             (   pregunta_sintoma(Orden, Elemento, Texto),
                 categoria_sintoma(Elemento, Categoria),
-                titulo_categoria(Categoria, Titulo)
+                titulo_categoria(Categoria, Titulo),
+                orden_categoria(Categoria, Rango),
+                Clave = k(Rango, Orden)
             ),
             Pares),
     keysort(Pares, Ordenados),
     valores_de_pares(Ordenados, Lista).
+
+% orden_categoria(+Categoria, -Rango): menor numero de pregunta de la categoria.
+orden_categoria(Categoria, Rango) :-
+    findall(O, (pregunta_sintoma(O, E, _), categoria_sintoma(E, Categoria)), Ordenes),
+    min_list(Ordenes, Rango).
 
 % preguntas_numericas(-Lista): [[Dato, Texto], ...]
 preguntas_numericas(Lista) :-
@@ -797,6 +827,8 @@ mensaje_evidencia(suficiente,
     'La evidencia ingresada es suficiente para un dictamen con certeza alta.').
 mensaje_evidencia(entrada_invalida,
     'La entrada no es válida: debe ser una lista sin variables libres y con átomos en minúscula.').
+mensaje_evidencia(entrada_incoherente,
+    'Hay datos que se contradicen entre sí (por ejemplo, carburador e inyección a la vez). Corríjalos para obtener un dictamen.').
 
 % dato_para_condicion(DatoNumerico, CondicionDelHistorialQueDeterminaAgravante)
 dato_para_condicion(km_mantenimiento,  mantenimiento_vencido).
@@ -1058,7 +1090,8 @@ item_resultado(Falla, Obs,
 %      diagnosticar_explicado(+Observados, -Resultados, -Descartadas, -Invalidos, -Alertas)
 diagnosticar_explicado(Observados, Resultados, Descartadas, Invalidos, Alertas) :-
     validar_entrada(Observados, Estado),
-    (   Estado == ok
+    (   Estado == ok,
+        validar_coherencia(Observados, [])
     ->  observados_validos(Observados, Validos, Invalidos),
         fallas_candidatas_ordenadas(Validos, Fallas),
         primeros(3, Fallas, Principales),
@@ -1069,6 +1102,13 @@ diagnosticar_explicado(Observados, Resultados, Descartadas, Invalidos, Alertas) 
                 Resultados),
         hipotesis_descartadas(Validos, Descartadas),
         alertas_seguridad(Validos, Alertas)
+    ;   Estado == ok
+    ->  % entrada con datos que se contradicen (R51): no se diagnostica
+        validar_coherencia(Observados, Problemas),
+        mensajes_de_problemas(Problemas, Alertas),
+        Resultados = [],
+        Descartadas = [],
+        Invalidos = [incoherente]
     ;   Resultados = [],
         Descartadas = [],
         Alertas = [],
@@ -1186,6 +1226,7 @@ sugerencias_desempate(Obs, Sugerencias) :-
     findall(k(NegPeso, Orden)-[sintoma, S, Pregunta, Peso, Confirma, Descarta],
             (   pregunta_sintoma(Orden, S, Pregunta),
                 \+ memberchk(S, Obs),
+                \+ genera_conflicto(S, Obs),
                 resumen_contribuciones(S, Hipotesis, Peso, Confirma, Descarta),
                 NegPeso is -Peso
             ),
@@ -1217,7 +1258,8 @@ hipotesis_en_competencia(Obs, Competencia) :-
 %      recomendar_evidencia(+Observados, -Estado, -Mensaje, -EnCompetencia, -Sugerencias)
 recomendar_evidencia(Observados, Estado, Mensaje, Competencia, Sugerencias) :-
     validar_entrada(Observados, Validez),
-    (   Validez == ok
+    (   Validez == ok,
+        \+ validar_coherencia(Observados, [_|_])
     ->  observados_validos(Observados, Validos, _),
         estado_evidencia(Validos, Estado),
         hipotesis_en_competencia(Validos, Competencia),
@@ -1225,8 +1267,776 @@ recomendar_evidencia(Observados, Estado, Mensaje, Competencia, Sugerencias) :-
         ->  Sugerencias = []
         ;   sugerencias_desempate(Validos, Sugerencias)
         )
-    ;   Estado = entrada_invalida,
+    ;   (   Validez == ok
+        ->  Estado = entrada_incoherente
+        ;   Estado = entrada_invalida
+        ),
         Competencia = [],
         Sugerencias = []
     ),
     mensaje_evidencia(Estado, Mensaje).
+
+% =====================================================================
+%  ENTREGABLE 2 (EXTENSION) - APRENDIZAJE: EL SISTEMA AGREGA FALLAS Y
+%  SINTOMAS NUEVOS A SU BASE DE CONOCIMIENTO
+%
+%  Cuando la moto presenta una falla que el sistema no conoce, el usuario
+%  puede ensenarsela: Prolog valida los datos, los agrega con assertz/1 a
+%  los mismos predicados del catalogo (ya declarados dinamicos al inicio)
+%  y los guarda en el archivo conocimiento_aprendido.pl. Ese archivo se
+%  carga cada vez que arranca el sistema, de modo que lo aprendido no se
+%  pierde. Las fallas del experto (R1 a R41) no se pueden modificar ni
+%  borrar: solo se puede olvidar lo que el usuario ensenio.
+% =====================================================================
+
+% =====================================================================
+%  SECCION 12. HECHOS - TEXTOS Y LIMITES DEL APRENDIZAJE
+% =====================================================================
+
+% mensaje_aprendizaje(Estado, Mensaje)
+mensaje_aprendizaje(ok,
+    'Listo: el sistema aprendió lo nuevo y ya lo usa en sus diagnósticos.').
+mensaje_aprendizaje(nombre_vacio,
+    'Escriba un nombre para la falla.').
+mensaje_aprendizaje(nombre_largo,
+    'El nombre de la falla es demasiado largo (máximo 60 caracteres).').
+mensaje_aprendizaje(ya_existe,
+    'Ya existe una falla o un síntoma con ese nombre.').
+mensaje_aprendizaje(subsistema_invalido,
+    'Elija un subsistema de la lista.').
+mensaje_aprendizaje(gravedad_invalida,
+    'Elija una gravedad de la lista: leve, moderada o crítica.').
+mensaje_aprendizaje(alimentacion_invalida,
+    'Elija el tipo de moto al que aplica la falla: carburador, inyección o cualquiera.').
+mensaje_aprendizaje(lista_invalida,
+    'Las listas de síntomas no son válidas.').
+mensaje_aprendizaje(pocos_requisitos,
+    'Indique al menos 2 condiciones principales: son los síntomas que definen la falla.').
+mensaje_aprendizaje(demasiados_requisitos,
+    'Indique como máximo 5 condiciones principales.').
+mensaje_aprendizaje(sintoma_desconocido,
+    'Algún síntoma elegido no existe en el catálogo. Agréguelo primero como síntoma nuevo.').
+mensaje_aprendizaje(sintomas_repetidos,
+    'Un mismo síntoma no puede estar repetido ni figurar a la vez como condición principal, de apoyo o excluyente.').
+mensaje_aprendizaje(sintomas_contradictorios,
+    'Las condiciones principales y de apoyo se contradicen: no pueden presentarse a la vez en una misma moto.').
+mensaje_aprendizaje(falla_equivalente,
+    'Ya existe una falla con las mismas condiciones principales y para el mismo tipo de moto.').
+mensaje_aprendizaje(agravante_invalido,
+    'Los agravantes del historial solo pueden ser mantenimiento vencido o batería antigua.').
+mensaje_aprendizaje(recomendacion_vacia,
+    'Escriba la recomendación que debe recibir el usuario con esta falla.').
+mensaje_aprendizaje(recomendacion_larga,
+    'La recomendación es demasiado larga (máximo 300 caracteres).').
+mensaje_aprendizaje(texto_vacio,
+    'Escriba una descripción del síntoma.').
+mensaje_aprendizaje(texto_largo,
+    'La descripción del síntoma es demasiado larga (máximo 80 caracteres).').
+mensaje_aprendizaje(categoria_invalida,
+    'Elija una categoría de la lista.').
+mensaje_aprendizaje(no_aprendida,
+    'Solo se puede olvidar lo que el usuario ensenó; el conocimiento del experto no se borra.').
+mensaje_aprendizaje(frase_sin_palabras,
+    'La expresión no tiene palabras útiles: escriba al menos una palabra que describa el síntoma.').
+mensaje_aprendizaje(frase_larga,
+    'La expresión es demasiado larga: use entre 1 y 6 palabras.').
+mensaje_aprendizaje(frase_repetida,
+    'Esa expresión ya está registrada para ese síntoma.').
+mensaje_aprendizaje(frase_ambigua,
+    'Esa expresión ya existe y significa otro síntoma.').
+mensaje_aprendizaje(elemento_desconocido,
+    'El síntoma elegido no existe en el catálogo.').
+mensaje_aprendizaje(no_autorizado,
+    'Acción reservada al rol Experto: inicie sesión como experto para modificar el conocimiento.').
+mensaje_aprendizaje(variable_desconocida,
+    'La variable de la lectura no existe.').
+mensaje_aprendizaje(lectura_invalida,
+    'La lectura debe ser un número.').
+mensaje_aprendizaje(en_uso,
+    'No se puede olvidar este síntoma porque una falla aprendida todavía lo usa. Olvide primero esa falla.').
+
+% sin_tilde(CaracterConTilde, CaracterSinTilde)
+sin_tilde(á, a). sin_tilde(à, a). sin_tilde(â, a). sin_tilde(ä, a).
+sin_tilde(é, e). sin_tilde(è, e). sin_tilde(ê, e). sin_tilde(ë, e).
+sin_tilde(í, i). sin_tilde(ì, i). sin_tilde(î, i). sin_tilde(ï, i).
+sin_tilde(ó, o). sin_tilde(ò, o). sin_tilde(ô, o). sin_tilde(ö, o).
+sin_tilde(ú, u). sin_tilde(ù, u). sin_tilde(û, u). sin_tilde(ü, u).
+sin_tilde(ñ, n).
+
+% limite_texto(Campo, MaximoDeCaracteres)
+limite_texto(nombre_falla,   60).
+limite_texto(nombre_sintoma, 80).
+limite_texto(recomendacion, 300).
+limite_requisitos(2, 5).
+
+% agravante_permitido(Condicion)
+agravante_permitido(mantenimiento_vencido).
+agravante_permitido(bateria_vieja).
+
+% alimentacion_permitida(Valor)
+alimentacion_permitida(cualquiera).
+alimentacion_permitida(carburador).
+alimentacion_permitida(inyeccion).
+
+% =====================================================================
+%  SECCION 13. REGLAS - NORMALIZACION DE TEXTO (procesamiento de listas)
+% =====================================================================
+
+% R42. texto_a_atomo(+Texto, -Atomo): convierte un texto libre en un identificador
+%      valido (minusculas, sin tildes, guiones bajos). Falla si no queda nada util.
+texto_a_atomo(Texto, Atomo) :-
+    atom_chars(Texto, Caracteres),
+    maplist(normalizar_caracter, Caracteres, Normalizados),
+    colapsar_guiones(Normalizados, Colapsados),
+    recortar_guiones(Colapsados, [Primero|Resto]),
+    (   char_type(Primero, digit)
+    ->  Cadena = [x, '_', Primero|Resto]
+    ;   Cadena = [Primero|Resto]
+    ),
+    atom_chars(Completo, Cadena),
+    (   atom_length(Completo, Largo), Largo > 40
+    ->  sub_atom(Completo, 0, 40, _, Corto0),
+        atom_chars(Corto0, CortoChars),
+        recortar_guiones(CortoChars, CortoLimpio),
+        atom_chars(Atomo, CortoLimpio)
+    ;   Atomo = Completo
+    ).
+
+% normalizar_caracter(+Caracter, -Normalizado): letra o digito en minuscula, o '_'.
+normalizar_caracter(Caracter, Normalizado) :-
+    downcase_atom(Caracter, Minuscula),
+    (   sin_tilde(Minuscula, Base)
+    ->  Letra = Base
+    ;   Letra = Minuscula
+    ),
+    (   atom_length(Letra, 1),
+        (   Letra @>= a, Letra @=< z
+        ;   Letra @>= '0', Letra @=< '9'
+        )
+    ->  Normalizado = Letra
+    ;   Normalizado = '_'
+    ).
+
+% colapsar_guiones(+Lista, -Lista): varios '_' seguidos pasan a uno (recursion).
+colapsar_guiones([], []).
+colapsar_guiones(['_', '_'|Resto], Lista) :-
+    !,
+    colapsar_guiones(['_'|Resto], Lista).
+colapsar_guiones([C|Resto], [C|Lista]) :-
+    colapsar_guiones(Resto, Lista).
+
+% recortar_guiones(+Lista, -Lista): quita los '_' del inicio y del final.
+recortar_guiones(['_'|Resto], Recortada) :-
+    !,
+    recortar_guiones(Resto, Recortada).
+recortar_guiones(Lista, Recortada) :-
+    reverse(Lista, ['_'|RevResto]),
+    !,
+    reverse(RevResto, Resto),
+    recortar_guiones(Resto, Recortada).
+recortar_guiones(Lista, Lista).
+
+% texto_util(+Texto, -Limpio): texto no vacio con los espacios normalizados.
+texto_util(Texto, Limpio) :-
+    atomic(Texto),
+    normalize_space(atom(Limpio), Texto),
+    Limpio \== ''.
+
+% capitalizar(+Texto, -Texto): primera letra en mayuscula.
+capitalizar(Texto, Capitalizado) :-
+    sub_atom(Texto, 0, 1, _, Inicial),
+    sub_atom(Texto, 1, _, 0, Resto),
+    upcase_atom(Inicial, Mayuscula),
+    atom_concat(Mayuscula, Resto, Capitalizado).
+
+% sin_signos(+Texto, -Texto): quita los signos de interrogacion.
+sin_signos(Texto, Limpio) :-
+    atom_chars(Texto, Caracteres),
+    exclude([C]>>memberchk(C, ['¿', '?']), Caracteres, Utiles),
+    atom_chars(Sucio, Utiles),
+    normalize_space(atom(Limpio), Sucio).
+
+% sintoma_conocido(+Elemento): existe en el catalogo y se puede usar como sintoma de falla.
+sintoma_conocido(Elemento) :-
+    atom(Elemento),
+    categoria_sintoma(Elemento, Categoria),
+    Categoria \== dato_moto.
+
+% =====================================================================
+%  SECCION 14. REGLAS - VALIDACION Y REGISTRO DE SINTOMAS NUEVOS
+% =====================================================================
+
+% R43. validar_sintoma_nuevo(+Texto, +Categoria, -Estado, -Elemento, -Nombre, -Pregunta)
+%      Reglas excluyentes con corte; la ultima es el caso "ok".
+validar_sintoma_nuevo(Texto, _, texto_vacio, '', '', '') :-
+    \+ texto_util(Texto, _),
+    !.
+validar_sintoma_nuevo(Texto, _, texto_largo, '', '', '') :-
+    texto_util(Texto, Limpio),
+    atom_length(Limpio, Largo),
+    limite_texto(nombre_sintoma, Maximo),
+    Largo > Maximo,
+    !.
+validar_sintoma_nuevo(_, Categoria, categoria_invalida, '', '', '') :-
+    \+ ( titulo_categoria(Categoria, _), Categoria \== dato_moto ),
+    !.
+validar_sintoma_nuevo(Texto, _, texto_vacio, '', '', '') :-
+    texto_util(Texto, Limpio),
+    sin_signos(Limpio, Sencillo),
+    \+ texto_a_atomo(Sencillo, _),
+    !.
+validar_sintoma_nuevo(Texto, _, ya_existe, Elemento, '', '') :-
+    texto_util(Texto, Limpio),
+    sin_signos(Limpio, Sencillo),
+    texto_a_atomo(Sencillo, Elemento),
+    (   categoria_sintoma(Elemento, _)
+    ;   falla_subsistema(Elemento, _)
+    ),
+    !.
+validar_sintoma_nuevo(Texto, _, ok, Elemento, Nombre, Pregunta) :-
+    texto_util(Texto, Limpio),
+    sin_signos(Limpio, Sencillo),
+    texto_a_atomo(Sencillo, Elemento),
+    downcase_atom(Sencillo, Nombre),
+    capitalizar(Sencillo, Frase),
+    format(atom(Pregunta), '¿~w?', [Frase]).
+
+% R44. registrar_sintoma(+Elemento, +Categoria, +Nombre, +Pregunta): lo agrega al catalogo
+%      con assertz/1 (no guarda en disco; tambien lo usa la carga del archivo).
+registrar_sintoma(Elemento, _, _, _) :-
+    categoria_sintoma(Elemento, _),
+    !.
+registrar_sintoma(Elemento, Categoria, Nombre, Pregunta) :-
+    findall(O, pregunta_sintoma(O, _, _), Ordenes),
+    max_list(Ordenes, Maximo),
+    Nuevo is Maximo + 1,
+    assertz(categoria_sintoma(Elemento, Categoria)),
+    assertz(nombre_elemento(Elemento, Nombre)),
+    assertz(pregunta_sintoma(Nuevo, Elemento, Pregunta)),
+    assertz(sintoma_aprendido(Elemento, Categoria, Nombre, Pregunta)),
+    registrar_frase_de_nombre(Elemento, Nombre).
+
+% R45. PREDICADO DE APRENDIZAJE DE SINTOMAS (lo invoca la interfaz).
+%      aprender_sintoma(+Texto, +Categoria, -Estado, -Mensaje, -Elemento)
+aprender_sintoma(Texto, Categoria, Estado, Mensaje, Elemento) :-
+    validar_sintoma_nuevo(Texto, Categoria, Estado, Elemento, Nombre, Pregunta),
+    (   Estado == ok
+    ->  registrar_sintoma(Elemento, Categoria, Nombre, Pregunta),
+        guardar_aprendizaje
+    ;   true
+    ),
+    mensaje_aprendizaje(Estado, Mensaje).
+
+% =====================================================================
+%  SECCION 15. REGLAS - VALIDACION Y REGISTRO DE FALLAS NUEVAS
+% =====================================================================
+
+% R46. validar_falla(+Nombre, +Subsistema, +Gravedad, +Requisitos, +Apoyos, +Excluyentes,
+%                    +Agravantes, +Alimentacion, +Recomendacion, -Estado, -Falla, -NombreLimpio, -RecLimpia)
+%      Cada regla detecta un problema y corta; la ultima es el caso "ok".
+validar_falla(Nombre, _, _, _, _, _, _, _, _, nombre_vacio, '', '', '') :-
+    \+ texto_util(Nombre, _),
+    !.
+validar_falla(Nombre, _, _, _, _, _, _, _, _, nombre_largo, '', '', '') :-
+    texto_util(Nombre, Limpio),
+    atom_length(Limpio, Largo),
+    limite_texto(nombre_falla, Maximo),
+    Largo > Maximo,
+    !.
+validar_falla(Nombre, _, _, _, _, _, _, _, _, nombre_vacio, '', '', '') :-
+    texto_util(Nombre, Limpio),
+    \+ texto_a_atomo(Limpio, _),
+    !.
+validar_falla(Nombre, _, _, _, _, _, _, _, _, ya_existe, Falla, '', '') :-
+    texto_util(Nombre, Limpio),
+    texto_a_atomo(Limpio, Falla),
+    (   falla_subsistema(Falla, _)
+    ;   categoria_sintoma(Falla, _)
+    ),
+    !.
+validar_falla(_, Subsistema, _, _, _, _, _, _, _, subsistema_invalido, '', '', '') :-
+    \+ ( nombre_subsistema(Subsistema, _), Subsistema \== general ),
+    !.
+validar_falla(_, _, Gravedad, _, _, _, _, _, _, gravedad_invalida, '', '', '') :-
+    \+ peso_gravedad(Gravedad, _),
+    !.
+validar_falla(_, _, _, _, _, _, _, Alimentacion, _, alimentacion_invalida, '', '', '') :-
+    \+ alimentacion_permitida(Alimentacion),
+    !.
+validar_falla(_, _, _, Req, Apo, Exc, Agr, _, _, lista_invalida, '', '', '') :-
+    (   \+ ground([Req, Apo, Exc, Agr])
+    ;   \+ ( is_list(Req), is_list(Apo), is_list(Exc), is_list(Agr) )
+    ),
+    !.
+validar_falla(_, _, _, Req, _, _, _, _, _, pocos_requisitos, '', '', '') :-
+    length(Req, N),
+    limite_requisitos(Minimo, _),
+    N < Minimo,
+    !.
+validar_falla(_, _, _, Req, _, _, _, _, _, demasiados_requisitos, '', '', '') :-
+    length(Req, N),
+    limite_requisitos(_, Maximo),
+    N > Maximo,
+    !.
+validar_falla(_, _, _, Req, Apo, Exc, _, _, _, sintoma_desconocido, '', '', '') :-
+    append([Req, Apo, Exc], Todos),
+    \+ forall(member(S, Todos), sintoma_conocido(S)),
+    !.
+validar_falla(_, _, _, Req, Apo, Exc, _, _, _, sintomas_repetidos, '', '', '') :-
+    append([Req, Apo, Exc], Todos),
+    sort(Todos, Unicos),
+    length(Todos, N),
+    length(Unicos, M),
+    N =\= M,
+    !.
+validar_falla(_, _, _, Req, Apo, _, _, _, _, sintomas_contradictorios, '', '', '') :-
+    append(Req, Apo, Juntos),
+    validar_coherencia(Juntos, [_|_]),
+    !.
+validar_falla(_, _, _, _, _, _, Agr, _, _, agravante_invalido, '', '', '') :-
+    \+ forall(member(A, Agr), agravante_permitido(A)),
+    !.
+validar_falla(_, _, _, _, _, _, _, _, Rec, recomendacion_vacia, '', '', '') :-
+    \+ texto_util(Rec, _),
+    !.
+validar_falla(_, _, _, _, _, _, _, _, Rec, recomendacion_larga, '', '', '') :-
+    texto_util(Rec, Limpia),
+    atom_length(Limpia, Largo),
+    limite_texto(recomendacion, Maximo),
+    Largo > Maximo,
+    !.
+validar_falla(_, _, _, Req, _, _, _, Alimentacion, _, falla_equivalente, Existente, '', '') :-
+    falla_con_mismos_requisitos(Req, Alimentacion, Existente),
+    !.
+validar_falla(Nombre, _, _, _, _, _, _, _, Rec, ok, Falla, NombreFinal, RecFinal) :-
+    texto_util(Nombre, Limpio),
+    texto_a_atomo(Limpio, Falla),
+    capitalizar(Limpio, NombreFinal),
+    texto_util(Rec, RecFinal).
+
+% R47. registrar_falla(+Falla, +Subsistema, +Nombre, +Req, +Apo, +Exc, +Gravedad, +Rec,
+%                      +Alimentacion, +Agravantes): agrega la falla con assertz/1 a
+%      los predicados del catalogo (no guarda en disco; tambien lo usa la carga del archivo).
+registrar_falla(Falla, _, _, _, _, _, _, _, _, _) :-
+    falla_subsistema(Falla, _),
+    !.
+registrar_falla(Falla, Subsistema, Nombre, Req, Apo, Exc, Gravedad, Rec, Alimentacion, Agr) :-
+    assertz(falla_subsistema(Falla, Subsistema)),
+    assertz(nombre_falla(Falla, Nombre)),
+    assertz(requisitos_falla(Falla, Req)),
+    forall(member(S, Apo), assertz(sintoma_apoyo(Falla, S))),
+    forall(member(S, Exc), assertz(excluyente(Falla, S))),
+    forall(member(A, Agr), assertz(agravante_de(Falla, A))),
+    (   Alimentacion == cualquiera
+    ->  true
+    ;   assertz(restriccion_alimentacion(Falla, Alimentacion))
+    ),
+    assertz(gravedad_base(Falla, Gravedad)),
+    assertz(recomendacion_base(Falla, Rec)),
+    assertz(falla_aprendida(Falla, Subsistema, Nombre, Req, Apo, Exc,
+                            Gravedad, Rec, Alimentacion, Agr)).
+
+% R48. PREDICADO DE APRENDIZAJE DE FALLAS (lo invoca la interfaz).
+%      aprender_falla(+Nombre, +Subsistema, +Gravedad, +Requisitos, +Apoyos, +Excluyentes,
+%                     +Agravantes, +Alimentacion, +Recomendacion, -Estado, -Mensaje, -Falla)
+aprender_falla(Nombre, Subsistema, Gravedad, Req, Apo, Exc, Agr, Alimentacion, Rec,
+               Estado, Mensaje, Falla) :-
+    validar_falla(Nombre, Subsistema, Gravedad, Req, Apo, Exc, Agr, Alimentacion, Rec,
+                  Estado, Falla, NombreFinal, RecFinal),
+    (   Estado == ok
+    ->  registrar_falla(Falla, Subsistema, NombreFinal, Req, Apo, Exc, Gravedad,
+                        RecFinal, Alimentacion, Agr),
+        guardar_aprendizaje
+    ;   true
+    ),
+    mensaje_de_aprendizaje(Estado, Req, Apo, Falla, Mensaje).
+
+% mensaje_de_aprendizaje(+Estado, +Req, +Apo, +Falla, -Mensaje): los dos errores de
+%   coherencia agregan el detalle (cual contradiccion, cual falla ya existe).
+mensaje_de_aprendizaje(sintomas_contradictorios, Req, Apo, _, Mensaje) :-
+    !,
+    append(Req, Apo, Juntos),
+    validar_coherencia(Juntos, [[_, Detalle]|_]),
+    format(atom(Mensaje),
+           'Las condiciones principales y de apoyo se contradicen. ~w', [Detalle]).
+mensaje_de_aprendizaje(falla_equivalente, _, _, Existente, Mensaje) :-
+    !,
+    nombre_falla(Existente, Nombre),
+    format(atom(Mensaje),
+           'Ya existe la falla «~w» con las mismas condiciones principales y para el mismo tipo de moto.',
+           [Nombre]).
+mensaje_de_aprendizaje(Estado, _, _, _, Mensaje) :-
+    mensaje_aprendizaje(Estado, Mensaje).
+
+% falla_con_mismos_requisitos(+Req, +Alimentacion, -Falla): una falla del catalogo ya
+%   exige exactamente esas condiciones y aplica al mismo tipo de moto.
+falla_con_mismos_requisitos(Req, Alimentacion, Falla) :-
+    sort(Req, Ordenados),
+    requisitos_falla(Falla, Otros),
+    sort(Otros, Ordenados),
+    (   restriccion_alimentacion(Falla, Tipo)
+    ->  true
+    ;   Tipo = cualquiera
+    ),
+    Tipo == Alimentacion,
+    !.
+
+% =====================================================================
+%  SECCION 16. REGLAS - OLVIDAR LO APRENDIDO
+% =====================================================================
+
+% quitar_falla(+Falla): retira de la memoria todos los hechos de una falla aprendida.
+quitar_falla(Falla) :-
+    retractall(falla_subsistema(Falla, _)),
+    retractall(nombre_falla(Falla, _)),
+    retractall(requisitos_falla(Falla, _)),
+    retractall(sintoma_apoyo(Falla, _)),
+    retractall(excluyente(Falla, _)),
+    retractall(agravante_de(Falla, _)),
+    retractall(restriccion_alimentacion(Falla, _)),
+    retractall(gravedad_base(Falla, _)),
+    retractall(recomendacion_base(Falla, _)),
+    retractall(falla_aprendida(Falla, _, _, _, _, _, _, _, _, _)).
+
+% quitar_sintoma(+Elemento): retira de la memoria un sintoma aprendido.
+quitar_sintoma(Elemento) :-
+    retractall(categoria_sintoma(Elemento, _)),
+    retractall(nombre_elemento(Elemento, _)),
+    retractall(pregunta_sintoma(_, Elemento, _)),
+    retractall(sintoma_aprendido(Elemento, _, _, _)),
+    retractall(frase_aprendida(_, Elemento)).
+
+% sintoma_en_uso(+Elemento): alguna falla lo usa como condicion, apoyo o excluyente.
+sintoma_en_uso(Elemento) :-
+    (   requisitos_falla(_, Req), memberchk(Elemento, Req)
+    ;   sintoma_apoyo(_, Elemento)
+    ;   excluyente(_, Elemento)
+    ),
+    !.
+
+% R49. olvidar_falla(+Falla, -Estado, -Mensaje): solo fallas aprendidas.
+olvidar_falla(Falla, ok, Mensaje) :-
+    falla_aprendida(Falla, _, _, _, _, _, _, _, _, _),
+    !,
+    quitar_falla(Falla),
+    guardar_aprendizaje,
+    mensaje_aprendizaje(ok, Mensaje).
+olvidar_falla(_, no_aprendida, Mensaje) :-
+    mensaje_aprendizaje(no_aprendida, Mensaje).
+
+% R50. olvidar_sintoma(+Elemento, -Estado, -Mensaje): solo sintomas aprendidos y sin uso.
+olvidar_sintoma(Elemento, no_aprendida, Mensaje) :-
+    \+ sintoma_aprendido(Elemento, _, _, _),
+    !,
+    mensaje_aprendizaje(no_aprendida, Mensaje).
+olvidar_sintoma(Elemento, en_uso, Mensaje) :-
+    sintoma_en_uso(Elemento),
+    !,
+    mensaje_aprendizaje(en_uso, Mensaje).
+olvidar_sintoma(Elemento, ok, Mensaje) :-
+    quitar_sintoma(Elemento),
+    guardar_aprendizaje,
+    mensaje_aprendizaje(ok, Mensaje).
+
+% =====================================================================
+%  SECCION 17. PERSISTENCIA: GUARDAR Y CARGAR LO APRENDIDO
+% =====================================================================
+
+% guardar_aprendizaje: escribe conocimiento_aprendido.pl como un archivo de directivas
+%   que, al consultarlo, vuelve a registrar todo lo aprendido. Escribe primero en un
+%   temporal para no dejar el archivo a medias si algo falla.
+guardar_aprendizaje :-
+    ruta_aprendizaje(Ruta),
+    atom_concat(Ruta, '.tmp', Temporal),
+    setup_call_cleanup(
+        open(Temporal, write, Salida, [encoding(utf8)]),
+        escribir_aprendizaje(Salida),
+        close(Salida)),
+    (   exists_file(Ruta)
+    ->  delete_file(Ruta)
+    ;   true
+    ),
+    rename_file(Temporal, Ruta).
+
+escribir_aprendizaje(Salida) :-
+    format(Salida, ':- encoding(utf8).~n', []),
+    format(Salida, '% Conocimiento aprendido por MotoDiag. Se genera solo: no lo edite a mano.~n', []),
+    forall(sintoma_aprendido(E, C, N, P),
+           format(Salida, ':- registrar_sintoma(~q, ~q, ~q, ~q).~n', [E, C, N, P])),
+    forall(falla_aprendida(F, S, N, R, A, X, G, T, L, V),
+           format(Salida, ':- registrar_falla(~q, ~q, ~q, ~q, ~q, ~q, ~q, ~q, ~q, ~q).~n',
+                  [F, S, N, R, A, X, G, T, L, V])),
+    forall(frase_aprendida(Palabras, Elemento),
+           format(Salida, ':- registrar_frase(~q, ~q).~n', [Palabras, Elemento])).
+
+% cargar_aprendizaje: consulta el archivo si existe; sus directivas registran lo aprendido.
+cargar_aprendizaje :-
+    ruta_aprendizaje(Ruta),
+    exists_file(Ruta),
+    !,
+    consult(Ruta).
+cargar_aprendizaje.
+
+% olvidar_todo_en_memoria: retira de la memoria todo lo aprendido (no toca el archivo).
+olvidar_todo_en_memoria :-
+    forall(falla_aprendida(F, _, _, _, _, _, _, _, _, _), quitar_falla(F)),
+    forall(sintoma_aprendido(E, _, _, _), quitar_sintoma(E)),
+    retractall(frase_aprendida(_, _)).
+
+% usar_archivo_aprendizaje(+Ruta): cambia el archivo de aprendizaje y lo carga
+%   (sirve para las pruebas, que no deben tocar el archivo real).
+usar_archivo_aprendizaje(Ruta) :-
+    olvidar_todo_en_memoria,
+    retractall(ruta_aprendizaje(_)),
+    assertz(ruta_aprendizaje(Ruta)),
+    cargar_aprendizaje.
+
+% reiniciar_aprendizaje: el sistema vuelve al conocimiento original del experto.
+reiniciar_aprendizaje :-
+    olvidar_todo_en_memoria,
+    guardar_aprendizaje.
+
+% =====================================================================
+%  SECCION 18. CONSULTAS PARA LA INTERFAZ DE APRENDIZAJE
+% =====================================================================
+
+% catalogo_sintomas(-Lista): [[Elemento, TituloCategoria, Nombre], ...] (sin datos de la moto)
+catalogo_sintomas(Lista) :-
+    findall(Clave-[Elemento, Titulo, Nombre],
+            (   pregunta_sintoma(Orden, Elemento, _),
+                sintoma_conocido(Elemento),
+                categoria_sintoma(Elemento, Categoria),
+                titulo_categoria(Categoria, Titulo),
+                orden_categoria(Categoria, Rango),
+                Clave = k(Rango, Orden),
+                etiqueta(Elemento, Nombre)
+            ),
+            Pares),
+    keysort(Pares, Ordenados),
+    valores_de_pares(Ordenados, Lista).
+
+% catalogo_subsistemas(-Lista): [[Id, Nombre], ...]
+catalogo_subsistemas(Lista) :-
+    findall([Id, Nombre],
+            (   nombre_subsistema(Id, Nombre),
+                Id \== general
+            ),
+            Lista).
+
+% catalogo_categorias(-Lista): [[Id, Titulo], ...]
+catalogo_categorias(Lista) :-
+    findall([Id, Titulo],
+            (   titulo_categoria(Id, Titulo),
+                Id \== dato_moto
+            ),
+            Lista).
+
+% catalogo_gravedades(-Lista): [[Nivel, Texto], ...] de menor a mayor gravedad
+catalogo_gravedades(Lista) :-
+    findall(Peso-[Nivel, Texto],
+            (   peso_gravedad(Nivel, Peso),
+                nombre_gravedad(Nivel, Texto)
+            ),
+            Pares),
+    keysort(Pares, Ordenados),
+    valores_de_pares(Ordenados, Lista).
+
+% listar_fallas_aprendidas(-Lista):
+%   [[Id, Nombre, Subsistema, Gravedad, Requisitos, Apoyos, Excluyentes, Alimentacion, Recomendacion], ...]
+listar_fallas_aprendidas(Lista) :-
+    findall([Id, Nombre, TSub, TGrav, TReq, TApo, TExc, Alimentacion, Rec],
+            (   falla_aprendida(Id, Sub, Nombre, Req, Apo, Exc, Grav, Rec, Alimentacion, _),
+                nombre_subsistema(Sub, TSub),
+                nombre_gravedad(Grav, TGrav),
+                maplist(etiqueta, Req, TReq),
+                maplist(etiqueta, Apo, TApo),
+                maplist(etiqueta, Exc, TExc)
+            ),
+            Lista).
+
+% listar_sintomas_aprendidos(-Lista): [[Elemento, TituloCategoria, Nombre], ...]
+listar_sintomas_aprendidos(Lista) :-
+    findall([Elemento, Titulo, Nombre],
+            (   sintoma_aprendido(Elemento, Categoria, Nombre, _),
+                titulo_categoria(Categoria, Titulo)
+            ),
+            Lista).
+
+% =====================================================================
+%  SECCION 19. HECHOS Y REGLAS - COHERENCIA DE LA ENTRADA
+%  Una moto real no puede presentar a la vez datos que se contradicen
+%  (carburador e inyeccion, luces normales y apagadas, humo de dos colores...).
+%  Prolog detecta esas contradicciones; la interfaz solo las muestra y evita
+%  que se marquen, y ningun diagnostico se calcula con datos contradictorios.
+% =====================================================================
+
+% grupo_exclusivo(Id, Descripcion, Miembros): como maximo UNO de los miembros puede ser cierto.
+grupo_exclusivo(alimentacion,
+    'el tipo de alimentación de la moto',
+    [alimentacion_carburador, alimentacion_inyeccion]).
+grupo_exclusivo(giro_motor,
+    'cómo gira el motor al dar arranque',
+    [motor_cranquea_normal, cranquea_lento, motor_no_cranquea]).
+grupo_exclusivo(chispa,
+    'el estado de la chispa de la bujía',
+    [sin_chispa, chispa_debil]).
+grupo_exclusivo(color_humo,
+    'el color del humo del escape',
+    [humo_negro, humo_blanco, humo_azul]).
+grupo_exclusivo(intensidad_luces,
+    'la intensidad de las luces',
+    [luces_normales, luces_debiles, sin_luces]).
+grupo_exclusivo(temperatura_falla,
+    'la temperatura del motor cuando ocurre la falla',
+    [falla_en_frio, falla_en_caliente]).
+
+% incompatible(A, B, Motivo): dos sintomas de grupos distintos que no pueden darse juntos.
+incompatible(no_enciende, se_apaga_en_marcha,
+    'Si la moto no enciende, no puede apagarse mientras anda.').
+incompatible(no_enciende, tirones_al_acelerar,
+    'Si la moto no enciende, no puede dar tirones al acelerar.').
+incompatible(no_enciende, rpm_sube_sin_avance,
+    'Si la moto no enciende, las revoluciones no pueden subir sin avance.').
+incompatible(no_enciende, falla_en_aceleracion,
+    'Si la moto no enciende, no puede fallar al acelerar en marcha.').
+incompatible(no_enciende, bateria_se_descarga_rodando,
+    'Si la moto no enciende, la batería no puede descargarse mientras anda.').
+incompatible(motor_cranquea_normal, click_al_arrancar,
+    'Un clic seco al arrancar significa que el motor no gira; no puede girar con fuerza normal.').
+incompatible(temperatura_alta, falla_en_frio,
+    'Con temperatura alta el motor no está frío.').
+
+% limite_dato(Dato, Minimo, Maximo): rango razonable de los datos numericos del historial.
+limite_dato(km_mantenimiento,   0, 100000).
+limite_dato(antiguedad_bateria, 0, 120).
+
+% nombre_dato(Dato, Texto)
+nombre_dato(km_mantenimiento,   'kilómetros desde el último mantenimiento').
+nombre_dato(antiguedad_bateria, 'meses de la batería instalada').
+
+% R51. problema(+Obs, -Tipo, -Mensaje): una contradiccion concreta dentro de la entrada.
+problema(Obs, exclusivo, Mensaje) :-
+    grupo_exclusivo(_, Descripcion, Miembros),
+    findall(M, ( member(M, Miembros), memberchk(M, Obs) ), Presentes),
+    Presentes = [_, _|_],
+    legible(Presentes, Texto),
+    format(atom(Mensaje),
+           'No pueden darse a la vez: ~w. Solo puede elegirse una opción sobre ~w.',
+           [Texto, Descripcion]).
+problema(Obs, incompatible, Mensaje) :-
+    incompatible(A, B, Mensaje),
+    memberchk(A, Obs),
+    memberchk(B, Obs).
+problema(Obs, fuera_de_rango, Mensaje) :-
+    limite_dato(Dato, Minimo, Maximo),
+    member(Item, Obs),
+    compound(Item),
+    Item =.. [Dato, Valor],
+    \+ ( number(Valor), Valor >= Minimo, Valor =< Maximo ),
+    nombre_dato(Dato, Nombre),
+    format(atom(Mensaje),
+           'Los ~w deben ser un número entre ~w y ~w.', [Nombre, Minimo, Maximo]).
+problema(Obs, dato_repetido, Mensaje) :-
+    limite_dato(Dato, _, _),
+    findall(x, ( member(Item, Obs), compound(Item), functor(Item, Dato, 1) ), Veces),
+    Veces = [_, _|_],
+    nombre_dato(Dato, Nombre),
+    format(atom(Mensaje),
+           'Los ~w se indicaron más de una vez: deje un solo valor.', [Nombre]).
+
+% R52. validar_coherencia(+Obs, -Problemas): lista [[Tipo, Mensaje], ...] sin repetidos.
+%      Lista vacia = la entrada no se contradice.
+validar_coherencia(Obs, Problemas) :-
+    findall([Tipo, Mensaje], problema(Obs, Tipo, Mensaje), Lista),
+    list_to_set(Lista, Problemas).
+
+% mensajes_de_problemas(+Problemas, -Mensajes): solo los textos (recursion sobre lista).
+mensajes_de_problemas([], []).
+mensajes_de_problemas([[_, Mensaje]|Resto], [Mensaje|Mensajes]) :-
+    mensajes_de_problemas(Resto, Mensajes).
+
+% R53. genera_conflicto(+Sintoma, +Obs): agregar el sintoma a Obs crearia una contradiccion.
+genera_conflicto(Sintoma, Obs) :-
+    (   grupo_exclusivo(_, _, Miembros),
+        memberchk(Sintoma, Miembros),
+        member(Otro, Miembros),
+        Otro \== Sintoma,
+        memberchk(Otro, Obs)
+    ;   incompatible(Sintoma, Otro, _),
+        memberchk(Otro, Obs)
+    ;   incompatible(Otro, Sintoma, _),
+        memberchk(Otro, Obs)
+    ),
+    !.
+
+% hay_sintoma(+Obs): al menos un sintoma (no basta con datos de la moto o del historial).
+hay_sintoma(Obs) :-
+    member(Elemento, Obs),
+    atom(Elemento),
+    categoria_sintoma(Elemento, Categoria),
+    Categoria \== dato_moto,
+    !.
+
+% R54. validar_observaciones(+Obs, -Estado, -Problemas): lo que la interfaz consulta en
+%      cada cambio. Estado: ok | entrada_invalida | incoherente | sin_sintomas
+validar_observaciones(Obs, entrada_invalida, [[entrada_invalida, Mensaje]]) :-
+    validar_entrada(Obs, Validez),
+    Validez \== ok,
+    !,
+    mensaje_evidencia(entrada_invalida, Mensaje).
+validar_observaciones(Obs, incoherente, Problemas) :-
+    validar_coherencia(Obs, Problemas),
+    Problemas = [_|_],
+    !.
+validar_observaciones(Obs, sin_sintomas, [[sin_sintomas, Mensaje]]) :-
+    \+ hay_sintoma(Obs),
+    !,
+    Mensaje = 'Marque al menos un síntoma que observe en la moto.'.
+validar_observaciones(_, ok, []).
+
+% grupos_exclusivos(-Lista): [[Id, Descripcion, Miembros], ...] para la interfaz.
+grupos_exclusivos(Lista) :-
+    findall([Id, Descripcion, Miembros], grupo_exclusivo(Id, Descripcion, Miembros), Lista).
+
+% limites_numericos(-Lista): [[Dato, Minimo, Maximo], ...] para la interfaz.
+limites_numericos(Lista) :-
+    findall([Dato, Minimo, Maximo], limite_dato(Dato, Minimo, Maximo), Lista).
+
+% =====================================================================
+%  SECCION 26. ROLES Y PERMISOS (Entregable 3)
+%  Solo el rol "experto" puede modificar el conocimiento (crear diagnosticos,
+%  sintomas y vocabulario, o olvidarlos). Cualquier rol puede diagnosticar.
+% =====================================================================
+
+% permiso(Rol, Accion)
+permiso(usuario, diagnosticar).
+permiso(usuario, describir_en_texto).
+permiso(experto, diagnosticar).
+permiso(experto, describir_en_texto).
+permiso(experto, ensenar_falla).
+permiso(experto, ensenar_sintoma).
+permiso(experto, ensenar_frase).
+permiso(experto, olvidar).
+
+% R71. autorizar(+Rol, +Accion, -Estado, -Mensaje): ok o no_autorizado.
+autorizar(Rol, Accion, ok, Mensaje) :-
+    permiso(Rol, Accion),
+    !,
+    mensaje_aprendizaje(ok, Mensaje).
+autorizar(_, _, no_autorizado, Mensaje) :-
+    mensaje_aprendizaje(no_autorizado, Mensaje).
+
+% =====================================================================
+%  ARRANQUE: ruta por defecto del archivo y carga de lo aprendido
+% =====================================================================
+
+% Entregable 3: la gramatica DCG vive en su propio archivo, junto a este.
+:- prolog_load_context(directory, Directorio),
+   directory_file_path(Directorio, 'gramatica_dcg.pl', RutaGramatica),
+   consult(RutaGramatica).
+
+:- prolog_load_context(directory, Directorio),
+   directory_file_path(Directorio, 'conocimiento_aprendido.pl', Ruta),
+   assertz(ruta_aprendizaje(Ruta)).
+
+:- cargar_aprendizaje.
